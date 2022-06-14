@@ -1,0 +1,14 @@
+---
+:id: 120500986
+:submitters:
+- :name: Wenyu Pan
+  :email: pan.we@northeastern.edu
+- :name: Shengqi Li
+  :email: li.shengq@northeastern.edu
+:created_at: !ruby/object:ActiveSupport::TimeWithZone
+  utc: 2022-04-07 20:43:38.223498000 Z
+  zone: !ruby/object:ActiveSupport::TimeZone
+    name: America/Los_Angeles
+  time: 2022-04-07 13:43:38.223498000 Z
+:status: processed
+:score: 100.0

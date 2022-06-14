@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+
+import argparse
+import socket
+import ssl
+import gzip
+
+from html.parser import HTMLParser
+from urllib.parse import urlparse
+
+DEFAULT_SERVER = "project5.3700.network"
+DEFAULT_PORT = 443
+BUFFER = 1000000
+
+# We extended the HTMLParser class to store links we find in the html and secret flag we find.
+class CustomHTMLParser(HTMLParser):
+    def __init__(self):
+        HTMLParser.__init__(self)
+        self.urls = []
+        self.secret_flags = []
+
+    # The method to handle links we find in the html.
+    def handle_starttag(self, tag, attrs):
+        if tag == "a":
+            for key, value in attrs:
+                if key == "href":
+                    self.urls.append(value)
+
+    # The method to handle secret flags.
+    def handle_data(self, data):
+        if "FLAG: " in data:
+            secret_flag = data.split(": ")[1]
+            self.secret_flags.append(secret_flag)
+
+
+class Crawler:
+
+    def __init__(self, args):
+        self.username = args.username
+        self.password = args.password
+        self.server = args.server
+        self.port = args.port
+        self.csrf = None
+        self.session_id = None
+
+    # The login method to first get the login page from the server and then send user information to it using post
+    # request.
+    def login(self):
+        url = f"https://{self.server}:{self.port}/accounts/login/?next=/fakebook/"
+        get_response = self.get(url)
+        self.update_cookies(get_response["cookies"])
+
+        content = f"username={self.username}&password={self.password}&csrfmiddlewaretoken={self.csrf}&next="
+        post_response = self.post(url, content)
+        self.update_cookies(post_response["cookies"])
+
+    # A method to construct a cookie dictionary using csrf and session id we have.
+    def get_cookies(self):
+        cookies = {}
+        if self.csrf is not None:
+            cookies["csrftoken"] = self.csrf
+        if self.session_id is not None:
+            cookies["sessionid"] = self.session_id
+        return cookies
+
+    # Update cookies according to the given cookie.
+    def update_cookies(self, cookies):
+        for cookie in cookies:
+            if "sessionid" in cookie:
+                self.session_id = cookie.split("; ")[0].split("=")[1]
+            if "csrftoken" in cookie:
+                self.csrf = cookie.split("; ")[0].split("=")[1]
+
+    # Here, we open a new socket for each message we send to the server, and parse the response to record the status,
+    # header, and data of the html.
+    def send(self, request):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect((self.server, self.port))
+
+        tls = ssl.wrap_socket(sock)
+        tls.send(request.encode('ascii'))
+        recv = tls.recv(BUFFER)
+        tls.close()
+
+        data = recv.split(b'\r\n\r\n')
+        response = {}
+        body = None
+        if len(data) > 1:
+            body = data[1]
+
+        # Since we use gzip here, we need to decompress it.
+        response["body"] = gzip.decompress(body).decode('ascii')
+        s_headers = data[0].decode('ascii')
+        s_headers = s_headers.split("\r\n")
+
+        status = int(s_headers[0].split(" ")[1])
+        response["status"] = status
+
+        response["headers"] = {}
+        response["cookies"] = []
+
+        # Get the headers and get cookie from it.
+        headers = s_headers[1:]
+        for header in headers:
+            key, value = header.split(": ")
+            if key == "Set-Cookie":
+                response["cookies"].append(value)
+            else:
+                response["headers"][key] = value
+        return response
+
+    # Get request. We first contruct a request using the helper method, and then if there is cookie, we
+    # construct the get request again and send to the server. We also use gzip and keep-alive connection to speed up the
+    # crawler.
+    def get(self, url):
+        url = urlparse(url)
+        request = self.construct_get_request(url)
+
+        cookies = self.get_cookies()
+        if len(cookies) > 0:
+            list = []
+            for k, v in cookies.items():
+                list.append(f'{k}={v}')
+            cookies = '; '.join(list)
+            cookie_header = f"Cookie: {cookies}\r\n"
+            request = self.construct_get_request(url, cookie_header)
+
+        return self.send(request)
+
+    def construct_get_request(self, url, cookie=None):
+        return f"""
+GET {url.path} HTTP/1.1
+Host: {url.netloc}
+Accept-Encoding: gzip
+Connection: keep-alive
+{cookie}
+
+        """
+
+    # Post has the similar approach to get, we also use keep-alive connection to speed up the process.
+    def post(self, url, content):
+        if self.server not in url:
+            print("url is not located in the server.")
+            return None
+
+        url = urlparse(url)
+        request = self.construct_post_request(url, content)
+
+        cookies = self.get_cookies()
+        if len(cookies) > 0:
+            list = []
+            for k, v in cookies.items():
+                list.append(f'{k} = {v}')
+            cookies = '; '.join(list)
+            header = f"Cookie: {cookies}\r\n"
+            request = self.construct_post_request(url, content, header)
+
+        return self.send(request)
+
+    def construct_post_request(self, url, content, cookie=None):
+        return f"""
+POST {url.path} HTTP/1.1
+Host: {url.netloc}
+Accept-Encoding: gzip
+Connection: keep-alive
+Content-Type: application/x-www-form-urlencoded
+Content-Length: {len(content)}
+{cookie}
+{content}
+        """
+
+    def run(self):
+        secret_flags = []
+        # We first append the root url to the queue.
+        queue = [f"https://{self.server}:{self.port}/fakebook/"]
+
+        visisted_pages = set()
+        # n = 0
+
+        while len(queue) > 0 and len(secret_flags) < 5:
+            # n += 1
+            # print("Count: ", n)
+
+            next = queue.pop()
+            if next in visisted_pages:
+                continue
+            # print("url: ", next, '\n')
+
+            # Check if it is valid url.
+            if "https" not in next:
+                continue
+
+            response = self.get(next)
+            visisted_pages.add(next)
+            status = response["status"]
+
+            self.update_cookies(response["cookies"])
+
+            # 200 OK
+            if status == 200:
+                html = response["body"]
+                parser = CustomHTMLParser()
+                parser.feed(html)
+
+                links = parser.urls
+
+                # Construct urls and append it to the end of the queue.
+                for link in links:
+                    if 'fakebook' not in link:
+                        continue
+                    url = f"https://{self.server}:{self.port}{link}"
+                    if url not in visisted_pages:
+                        queue.insert(0, url)
+
+                # If there is a secret flag, we will append it to the secret flag list.
+                secret_flags.extend(parser.secret_flags)
+                # print("Secret flags:", secret_flags)
+
+            # If 302 redirected, we will append it to the end of the queue.
+            elif status == 302:
+                queue.insert(0, response["headers"]["Location"])
+            # If the server return a 500 error, we will try it again by append it to the first of the queue.
+            elif status == 500:
+                queue.append(next)
+            else:
+                continue
+
+        return secret_flags
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='crawl Fakebook')
+    parser.add_argument('-s', dest="server", type=str, default=DEFAULT_SERVER, help="The server to crawl")
+    parser.add_argument('-p', dest="port", type=int, default=DEFAULT_PORT, help="The port to use")
+    parser.add_argument('username', type=str, help="The username to use")
+    parser.add_argument('password', type=str, help="The password to use")
+    args = parser.parse_args()
+    sender = Crawler(args)
+    sender.login()
+    # After the crawler returns, we print out the secret flags.
+    res = sender.run()
+    for f in res:
+        print(f)
